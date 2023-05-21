@@ -9,14 +9,9 @@ import click
 from tqdm import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
 
-import vgarus_client.client
-import vgarus_client.logging_config
-import vgarus_client.models
-import vgarus_client.readers
-import vgarus_client.service
-import vgarus_client.utils
+from vgarus_client import io_utils, logging_config, models, service, utils
 
-logging.config.dictConfig(vgarus_client.logging_config.LOGGING)
+logging.config.dictConfig(logging_config.LOGGING)
 logger = logging.getLogger("vgarus")
 
 
@@ -31,10 +26,10 @@ def cli():
 def split_package(package: Path, basename: str | None = None) -> None:
     """Split single json package to fasta and metadata tsv"""
 
-    p = vgarus_client.models.Package.parse_file(package)
+    samples = io_utils.read_json_to_samples(package)
 
-    metadata = p.to_tsv()
-    fasta = p.to_fasta()
+    metadata = io_utils.samples_to_tsv(samples)
+    fasta = io_utils.samples_to_fasta(samples)
 
     base = Path(basename) if basename else package
     with open(base.with_suffix(".tsv"), "w") as fo:
@@ -54,14 +49,15 @@ def split_package(package: Path, basename: str | None = None) -> None:
 def combine_package(metadata: Path, fasta: Path, basename: str | None = None) -> None:
     """Combine metadata tsv and fasta to a single json package"""
 
-    p = vgarus_client.readers.read_fasta_and_tsv_to_package(
+    samples = io_utils.read_fasta_and_tsv_to_samples(
         fasta_file=fasta, tsv_file=metadata
     )
 
     base = Path(basename) if basename else metadata
+    samples_data = [sample.export() for sample in samples]
 
     with open(base.with_suffix(".json"), "w") as fo:
-        fo.write(p.to_json())
+        json.dump(samples_data, fo, ensure_ascii=False)
 
 
 @cli.command()
@@ -70,14 +66,14 @@ def metadata_template(native: bool) -> None:
     """Prints tsv header for metadata"""
 
     if not native:
-        print(*vgarus_client.models.SampleData.__fields__.keys(), sep="\t")
+        print(*models.SampleData.__fields__.keys(), sep="\t")
     else:
         print(
             *[
                 field.alias if field.alias else field_name
-                for field_name, field in vgarus_client.models.SampleData.__fields__.items()
+                for field_name, field in models.SampleData.__fields__.items()
             ],
-            sep="\t"
+            sep="\t",
         )
 
 
@@ -94,9 +90,7 @@ def metadata_template(native: bool) -> None:
 def dictionaries(username: str | None, password: str | None, env: Path | None) -> None:
     """Get VGARUS dictionaries"""
 
-    client = vgarus_client.service.get_client(
-        username=username, password=password, env=env
-    )
+    client = service.get_client(username=username, password=password, env=env)
     if client is None:
         click.echo("Pass username and password or env file")
         return
@@ -139,41 +133,33 @@ def upload(
     """Upload to VGARUS"""
 
     if package is not None and metadata is None and fasta is None:
-        p = vgarus_client.models.Package.parse_file(package)
-        base = Path(basename) if basename else package
+        samples = io_utils.read_json_to_samples(package)
+        base = Path(basename) if basename else package.with_suffix("")
     elif package is None and metadata is not None and fasta is not None:
-        p = vgarus_client.readers.read_fasta_and_tsv_to_package(
+        samples = io_utils.read_fasta_and_tsv_to_samples(
             fasta_file=fasta, tsv_file=metadata
         )
-        base = Path(basename) if basename else metadata
+        base = Path(basename) if basename else metadata.with_suffix("")
     else:
         click.echo("Specify package or metadata with fasta")
         return
 
-    client = vgarus_client.service.get_client(
-        username=username, password=password, env=env
-    )
+    results_path = base.with_suffix(".result.tsv")
+    if results_path.exists():
+        click.echo(f"Result path exists, change basename: {results_path}")
+        return
+
+    leftover_path = base.with_suffix(".leftover.tsv")
+    if leftover_path.exists():
+        click.echo(f"Leftover path exists, change basename: {results_path}")
+        return
+
+    client = service.get_client(username=username, password=password, env=env)
     if client is None:
         click.echo("Pass username and password or env file")
         return
 
-    results_path = base
-    for path in vgarus_client.utils.iter_enumerated_suffix(
-        base, second_last_suffix="result", last_suffix="tsv"
-    ):
-        results_path = path
-        if not path.exists():
-            break
-
-    leftover_path = base
-    for path in vgarus_client.utils.iter_enumerated_suffix(
-        base, second_last_suffix="leftover", last_suffix="tsv"
-    ):
-        leftover_path = path
-        if not path.exists():
-            break
-
-    batch_number = math.ceil(len(p) / batch_size)
+    batch_number = math.ceil(len(samples) / batch_size)
 
     ok, not_ok = 0, 0
     with tqdm(
@@ -183,19 +169,19 @@ def upload(
     ) as leftover_o:
         results_writer = csv.DictWriter(
             results_o,
-            fieldnames=vgarus_client.models.UploadResult.__fields__.keys(),
+            fieldnames=models.UploadResult.__fields__.keys(),
             delimiter="\t",
         )
         leftover_writer = csv.DictWriter(
             leftover_o,
-            fieldnames=vgarus_client.models.SampleData.__fields__.keys(),
+            fieldnames=models.SampleData.__fields__.keys(),
             delimiter="\t",
         )
         results_writer.writeheader()
         leftover_writer.writeheader()
 
-        for result, batch in vgarus_client.service.upload_package(
-            client, package=p, batch_size=batch_size
+        for result, batch in service.upload_samples(
+            client, samples=samples, batch_size=batch_size
         ):
             for upload_result, sample in zip(result, batch):
                 if upload_result.ok:

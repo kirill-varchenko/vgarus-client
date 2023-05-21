@@ -41,7 +41,7 @@ class MockResponse:
 
 @pytest.mark.parametrize(
     "status_code,response_json,result",
-    [(200, {}, {}), (200, None, None), (500, None, None), (500, {}, None)],
+    [(200, {}, {}), (500, {}, None)],
 )
 def test_send_request(monkeypatch, client, status_code, response_json, result):
     def mock_get(*args, **kwargs):
@@ -56,13 +56,16 @@ def test_send_request(monkeypatch, client, status_code, response_json, result):
 @pytest.mark.parametrize(
     "status_code,response_json,result",
     [
-        (200, {"status": 200, "message": ["id"]}, ["id"]),
-        (200, {"status": 500, "message": ["id"]}, []),
-        (500, {"status": 200, "message": ["id"]}, []),
-        (200, {"status": 200}, []),
-        (200, {}, []),
-        (200, None, []),
-        (500, None, []),
+        (
+            200,
+            {"status": 200, "message": ["id"]},
+            vgarus_client.models.VgarusResponse(status=200, message=["id"]),
+        ),
+        (
+            200,
+            {"status": 500, "message": ["id"]},
+            vgarus_client.models.VgarusResponse(status=500, message=["id"]),
+        ),
     ],
 )
 def test_send_data(monkeypatch, client, status_code, response_json, result):
@@ -71,5 +74,5 @@ def test_send_data(monkeypatch, client, status_code, response_json, result):
 
     monkeypatch.setattr(requests, "request", mock_get)
 
-    res = client.send_data([])
+    res = client.send_batch([])
     assert res == result

@@ -1,14 +1,21 @@
 from __future__ import annotations
 
-import csv
-import io
+import json
 import re
 from datetime import date
 
-from pydantic import (BaseModel, BaseSettings, Field, NonNegativeInt,
-                      root_validator, validator)
+from pydantic import (
+    BaseModel,
+    BaseSettings,
+    Field,
+    NonNegativeInt,
+    root_validator,
+    validator,
+)
 
 from . import enums, utils
+
+RE_VIRUS_NAME_IN_RESPONSE_ERRORS = re.compile(r"sample_name: (.*?):")
 
 
 class SampleData(BaseModel):
@@ -48,75 +55,65 @@ class SampleData(BaseModel):
             return None
         return v
 
-    @validator("collection_date")
+    @validator("collection_date", pre=True)
     def validate_iso_date(cls, v: str) -> str:
-        compete_raw_date = utils.complete_iso_date_string(v)
-        date.fromisoformat(compete_raw_date)  # Will raise ValueError for a wrong date
-        return v
+        complete_raw_date = utils.complete_iso_date_string(v)
+        date.fromisoformat(complete_raw_date)  # Will raise ValueError for a wrong date
+        return complete_raw_date
 
 
-# TODO Something is wrong with this model
-class Fasta(BaseModel):
-    __root__: str
+class Sequence(BaseModel):
+    header: str
+    body: str
 
-    @root_validator
-    def clean_fasta(cls, values):
-        s = re.search(
-            r"^>(?P<title>.*?)$\s*(?P<sequence>[^>]*)", values["__root__"], re.MULTILINE
-        )
+    @validator("header")
+    def normalize_header(cls, v):
+        return utils.normalize_name(v)
+
+    @validator("body")
+    def remove_whitespaces(cls, v):
+        return utils.remove_whitespaces(v)
+
+    @classmethod
+    def parse_fasta(cls, fasta: str) -> Sequence:
+        s = re.search(r"^>(?P<header>.*?)$\s*(?P<body>[^>]*)", fasta, re.MULTILINE)
         if not s:
             raise ValueError("Incorrect fasta")
-        title = utils.normalize_name(s.group("title").strip())
-        sequence = re.sub(r"\s", "", s.group("sequence"))
-        if not sequence:
-            raise ValueError("Empty sequence")
-        return {"__root__": f">{title}\n{sequence}"}
+        return cls(**s.groupdict())
 
-    @property
-    def title(self) -> str:
-        return self.__root__.partition("\n")[0].removeprefix(">")
+    def __eq__(self, other: Sequence) -> bool:
+        return self.header == other.header
 
-    def __eq__(self, other) -> bool:
-        return self.__root__ == other
+    def to_fasta(self) -> str:
+        return f">{self.header}\n{self.body}"
+
+    def __repr__(self) -> str:
+        return f"Sequence(header={self.header!r}, body='{self.body[:10]}...')"
 
 
 class Sample(BaseModel):
     sample_data: SampleData
-    sequence: Fasta
+    sequence: Sequence
+
+    @root_validator(pre=True)
+    def parse_fasta(cls, values):
+        if isinstance(values["sequence"], str):
+            values["sequence"] = Sequence.parse_fasta(values["sequence"])
+        return values
 
     @root_validator
     def names_match(cls, values):
-        if values["sample_data"].virus_name != values["sequence"].title:
-            raise ValueError("Sample data virus name and sequence title mismach")
+        if values["sample_data"].virus_name != values["sequence"].header:
+            raise ValueError("Sample data virus name and sequence header mismach")
         return values
 
+    def export(self) -> dict:
+        """Export Sample as a dict suitable for posting to VgaRus."""
 
-class Package(BaseModel):
-    __root__: list[Sample]
-
-    def __iter__(self):
-        return iter(self.__root__)
-
-    def __getitem__(self, idx) -> Sample:
-        return self.__root__[idx]
-
-    def __len__(self) -> int:
-        return len(self.__root__)
-
-    def to_json(self) -> str:
-        return self.json(exclude_none=True, by_alias=True, ensure_ascii=False, indent=2)
-
-    def to_fasta(self) -> str:
-        return "\n".join(sample.sequence.__root__ for sample in self.__root__)
-
-    def to_tsv(self) -> str:
-        with io.StringIO() as buffer:
-            writer = csv.DictWriter(
-                buffer, fieldnames=SampleData.__fields__.keys(), delimiter="\t"
-            )
-            writer.writeheader()
-            writer.writerows(sample.sample_data.dict() for sample in self.__root__)
-            return buffer.getvalue()
+        return {
+            "sample_data": self.sample_data.dict(by_alias=True, exclude_none=True),
+            "sequence": self.sequence.to_fasta(),
+        }
 
 
 class VgarusAuth(BaseSettings):
@@ -128,11 +125,41 @@ class VgarusAuth(BaseSettings):
         case_sensitive = False
 
 
+class VgarusResponse(BaseModel):
+    status: int
+    message: list[str]
+    errors: list[str] = []
+
+    @validator("errors", pre=True)
+    def parse_errors(cls, v):
+        if isinstance(v, str):
+            return json.loads(v)
+        return v
+
+    @validator("message", pre=True)
+    def parse_input_json(cls, v):
+        if isinstance(v, list):
+            return v
+        try:
+            parsed = json.loads(v)
+            return parsed.get("inputJson", [])
+        except:
+            pass
+        return []
+
+    def get_errors_virus_names(self) -> list[str]:
+        return [
+            s.group(1)
+            for error in self.errors
+            if (s := RE_VIRUS_NAME_IN_RESPONSE_ERRORS.search(error))
+        ]
+
+
 class UploadResult(BaseModel):
     virus_name: str
     gisaid_id: str
     submittion_date: date = Field(default_factory=date.today)
-    vgarus_id: str | None
+    vgarus_id: str | None = None
 
     @property
     def ok(self) -> bool:

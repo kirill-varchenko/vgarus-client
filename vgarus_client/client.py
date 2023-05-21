@@ -20,10 +20,15 @@ class VgarusClient:
             username=auth.username, password=auth.password
         )
 
-    def _send_request(self, method: str, url: str, data: list | dict | None = None):
-        logger.debug("Sending %s to %s, data length: %s", method, url, len(data) if data else 0)
+    def _send_request(
+        self, method: str, url: str, data: list[dict] | None = None
+    ) -> dict | None:
+        logger.debug(
+            "Sending %s to %s, data length: %s", method, url, len(data) if data else 0
+        )
         try:
-            response = requests.request(method=method,
+            response = requests.request(
+                method=method,
                 url=url,
                 json=data,
                 auth=self.auth,
@@ -40,37 +45,18 @@ class VgarusClient:
         except:
             logging.exception("Unpredicted exception")
         return None
-        
-    def get_dictionary(self):
+
+    def get_dictionary(self) -> dict:
         """Gets a coding dictionary"""
 
-        return self._send_request("GET", self.DICTIONARY_URL)
+        res = self._send_request("GET", self.DICTIONARY_URL)
+        return res or {}
 
-    def send_data(self, data: list[dict]) -> list:
-        """Sends data
-
-        Parameters
-        ----------
-        data : list[dict]
-            list of dicts like [{"sample_data": {...}, "sequence": "abc"}]
-
-        Returns
-        -------
-        list
-            list of assigned ids or [] in case of any error
-        """
-
+    def send_batch(self, batch: list[models.Sample]) -> models.VgarusResponse:
+        data = [sample.export() for sample in batch]
         response_data = self._send_request("POST", self.UPLOAD_URL, data)
 
-        if response_data is None or not isinstance(response_data, dict):
-            logger.warning("Empty or not dict response data")
-            return []
+        if response_data is None:
+            raise ValueError("No response")
 
-        status = response_data.get("status")
-
-        if status == 200:
-            return response_data.get("message", [])
-        else:
-            logger.warning("Status not OK: %s", response_data)
-        
-        return []
+        return models.VgarusResponse.parse_obj(response_data)
